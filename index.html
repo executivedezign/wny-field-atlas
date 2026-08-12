@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#1f6f43" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>WNY Field Atlas</title>
+<link href="vendor/maplibre-gl.css" rel="stylesheet" />
+<style>
+  :root{ --green:#1f6f43; --ink:#14261c; --panel:#ffffff; --muted:#5b6b62; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; color:var(--ink); }
+  #map{ position:absolute; inset:0; }
+  .topbar{ position:absolute; top:0; left:0; right:0; z-index:5; display:flex; gap:8px; align-items:center;
+    padding:calc(env(safe-area-inset-top) + 10px) 12px 10px; background:linear-gradient(#000a,transparent); color:#fff; pointer-events:none;}
+  .topbar h1{ font-size:16px; margin:0; font-weight:600; text-shadow:0 1px 3px #0008; flex:1; }
+  .btn{ pointer-events:auto; border:0; border-radius:12px; padding:9px 12px; font-size:14px; font-weight:600;
+    background:var(--panel); color:var(--ink); box-shadow:0 2px 8px #0003; }
+  .btn.primary{ background:var(--green); color:#fff; }
+  .sheet{ position:absolute; left:0; right:0; bottom:0; z-index:6; background:var(--panel);
+    border-radius:18px 18px 0 0; box-shadow:0 -4px 24px #0003; transform:translateY(100%);
+    transition:transform .25s ease; max-height:70vh; overflow:auto; padding:14px 16px calc(env(safe-area-inset-bottom) + 18px); }
+  .sheet.open{ transform:translateY(0); }
+  .sheet h2{ margin:2px 0 2px; font-size:19px; }
+  .sheet .sub{ color:var(--muted); font-size:13px; margin-bottom:10px; }
+  .grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .kv{ background:#f2f6f3; border-radius:10px; padding:8px 10px; }
+  .kv .k{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .kv .v{ font-size:16px; font-weight:600; }
+  .close{ position:absolute; right:12px; top:10px; font-size:22px; color:var(--muted); background:none; border:0; }
+  .county-row{ display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid #eef2ef; }
+  .county-row .nm{ flex:1; font-weight:600; }
+  .pill{ font-size:11px; padding:2px 8px; border-radius:999px; background:#e7efe9; color:var(--green); font-weight:700; }
+  .pill.have{ background:var(--green); color:#fff; }
+  .mini{ font-size:12px; color:var(--muted); }
+  .toast{ position:absolute; left:50%; bottom:calc(env(safe-area-inset-bottom) + 20px); transform:translateX(-50%);
+    z-index:9; background:#111d; color:#fff; padding:10px 14px; border-radius:12px; font-size:13px; opacity:0;
+    transition:opacity .2s; pointer-events:none; max-width:86%; text-align:center; }
+  .toast.show{ opacity:1; }
+  input[type=file]{ display:none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="topbar">
+  <h1>WNY Field Atlas</h1>
+  <button class="btn" id="mapsBtn">Maps</button>
+  <button class="btn primary" id="locBtn">Locate</button>
+</div>
+
+<!-- Feature info sheet -->
+<div class="sheet" id="infoSheet">
+  <button class="close" onclick="closeSheet('infoSheet')">&times;</button>
+  <div id="infoBody"></div>
+</div>
+
+<!-- County maps manager sheet -->
+<div class="sheet" id="mapsSheet">
+  <button class="close" onclick="closeSheet('mapsSheet')">&times;</button>
+  <h2>County maps</h2>
+  <div class="sub">Import a county's map file once; it's stored on your phone and works offline. Tap a county to import or toggle it.</div>
+  <div id="countyList"></div>
+  <p class="mini" style="margin-top:12px">Map files (<code>.pmtiles</code>) are the county tiles your PC generated. Get them onto the phone (Files/iCloud), then tap “Import”.</p>
+</div>
+
+<input type="file" id="fileInput" accept=".pmtiles" />
+<div class="toast" id="toast"></div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script src="vendor/pmtiles.js"></script>
+<script>
+// ---------------------------------------------------------------- config & state
+const CENTER = [-78.6, 42.6], ZOOM = 8;          // Western NY
+const pmProtocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", pmProtocol.tile);
+
+let importTargetCounty = null;                    // which county an import is for
+const loadedCounties = new Set();                 // counties whose tiles are active
+
+// ---------------------------------------------------------------- OPFS tile storage
+// County .pmtiles are stored in the Origin Private File System so they persist
+// offline and are never uploaded anywhere (copyright-safe: they stay on the device).
+async function opfsDir(){ const root = await navigator.storage.getDirectory(); return root; }
+async function saveTiles(county, file){
+  const root = await opfsDir();
+  const fh = await root.getFileHandle(fname(county), {create:true});
+  const w = await fh.createWritable();
+  await w.write(file); await w.close();
+}
+async function haveTiles(county){
+  try{ const root = await opfsDir(); await root.getFileHandle(fname(county)); return true; }
+  catch(e){ return false; }
+}
+async function getTilesFile(county){
+  const root = await opfsDir();
+  const fh = await root.getFileHandle(fname(county));
+  return await fh.getFile();                       // File supports ranged .slice() — memory-safe
+}
+function fname(c){ return "county_" + c.toLowerCase().replace(/[^a-z0-9]+/g,"_") + ".pmtiles"; }
+
+// ---------------------------------------------------------------- map
+const map = new maplibregl.Map({
+  container:"map",
+  center:CENTER, zoom:ZOOM, maxZoom:16, minZoom:6,
+  style:{
+    version:8,
+    sources:{
+      // Fallback online base so the app is usable before atlas tiles are imported.
+      osm:{ type:"raster", tiles:["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize:256, attribution:"© OpenStreetMap" }
+    },
+    layers:[ { id:"osm", type:"raster", source:"osm" } ]
+  }
+});
+window.map = map;   // exposed for debugging / testing
+map.addControl(new maplibregl.NavigationControl({showCompass:false}), "bottom-right");
+const geolocate = new maplibregl.GeolocateControl({
+  positionOptions:{ enableHighAccuracy:true },
+  trackUserLocation:true, showUserHeading:true, showAccuracyCircle:true
+});
+map.addControl(geolocate, "bottom-right");
+document.getElementById("locBtn").onclick = ()=> geolocate.trigger();
+
+// ---------------------------------------------------------------- register a county's atlas tiles
+async function activateCounty(county){
+  if(loadedCounties.has(county)) return;
+  const file = await getTilesFile(county);
+  const src = new pmtiles.FileSource(file);
+  const p = new pmtiles.PMTiles(src);
+  pmProtocol.add(p);
+  const key = src.getKey();                        // pmtiles:// key === file name
+  const sid = "atlas_" + county;
+  map.addSource(sid, { type:"raster", url:"pmtiles://"+key, tileSize:256 });
+  // place atlas above OSM base, below the data points
+  const before = map.getLayer("data-pts") ? "data-pts" : undefined;
+  map.addLayer({ id:sid, type:"raster", source:sid, paint:{ "raster-fade-duration":150 } }, before);
+  loadedCounties.add(county);
+}
+
+// ---------------------------------------------------------------- data overlay (ponds/trails/wildlife)
+async function loadData(){
+  let fc = { type:"FeatureCollection", features:[] };
+  try{ fc = await (await fetch("data.geojson")).json(); }catch(e){ console.warn("no data.geojson", e); }
+  map.addSource("data", { type:"geojson", data:fc });
+  map.addLayer({ id:"data-pts", type:"circle", source:"data",
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],7,3,12,6,15,9],
+      "circle-color":["match",["get","kind"],
+         "lake","#1668c1","pond","#1aa0c4","trail","#c26a1a",
+         "wma","#7a3fb0","viewing","#2e8b57","forest","#4b7a2f",
+         "#555"],
+      "circle-stroke-width":1.5, "circle-stroke-color":"#fff"
+    }});
+  map.on("click","data-pts", e=> showFeature(e.features[0]));
+  map.on("mouseenter","data-pts", ()=> map.getCanvas().style.cursor="pointer");
+  map.on("mouseleave","data-pts", ()=> map.getCanvas().style.cursor="");
+  buildCountyList(fc);
+}
+
+// ---------------------------------------------------------------- feature info sheet
+function showFeature(f){
+  const p = f.properties || {};
+  const rows = [];
+  const add=(k,v)=>{ if(v!==undefined && v!==null && v!=="" && v!=="None") rows.push(`<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`); };
+  add("County", p.county); add("Acres", p.acres); add("Depth (ft)", p.depth);
+  add("Elev (ft)", p.elev); add("Length (mi)", p.length); add("Habitat", p.habitat);
+  add("Land", p.landtype); add("Atlas cell", p.pgcoord);
+  let extra = "";
+  if(p.species) extra += `<p style="margin:10px 0 0"><b>Species:</b> ${p.species}</p>`;
+  if(p.also_open_to) extra += `<p style="margin:8px 0 0"><b>Also open to:</b> ${p.also_open_to}</p>`;
+  if(p.uses) extra += `<p style="margin:8px 0 0">${p.uses}</p>`;
+  document.getElementById("infoBody").innerHTML =
+    `<h2>${p.name||"Feature"}</h2><div class="sub">${labelKind(p.kind)}${p.pgcoord?" · approx. from atlas cell":""}</div>
+     <div class="grid">${rows.join("")}</div>${extra}`;
+  openSheet("infoSheet");
+}
+function labelKind(k){ return ({lake:"Lake / fishing water",pond:"Pond",trail:"Trail",wma:"Wildlife Management Area",viewing:"Wildlife viewing area",forest:"State forest"})[k]||"Location"; }
+
+// ---------------------------------------------------------------- county manager UI
+async function buildCountyList(fc){
+  const counties = [...new Set(fc.features.map(f=>f.properties && f.properties.county).filter(Boolean))].sort();
+  const box = document.getElementById("countyList");
+  box.innerHTML = "";
+  for(const c of counties){
+    const has = await haveTiles(c);
+    const row = document.createElement("div"); row.className="county-row";
+    row.innerHTML = `<div class="nm">${c}</div>
+       <span class="pill ${has?"have":""}" data-c="${c}">${has?"On device":"Import"}</span>`;
+    row.querySelector(".pill").onclick = async ()=>{
+      if(await haveTiles(c)){ await activateCounty(c); toast(`${c} map is on — pan to it`); closeSheet("mapsSheet"); }
+      else { importTargetCounty = c; document.getElementById("fileInput").click(); }
+    };
+    box.appendChild(row);
+  }
+}
+document.getElementById("fileInput").onchange = async (e)=>{
+  const file = e.target.files[0]; if(!file || !importTargetCounty) return;
+  toast(`Saving ${importTargetCounty}…`);
+  try{
+    await saveTiles(importTargetCounty, file);
+    await activateCounty(importTargetCounty);
+    toast(`${importTargetCounty} imported ✓`);
+    buildCountyList(await (await fetch("data.geojson")).json());
+    closeSheet("mapsSheet");
+  }catch(err){ console.error(err); toast("Import failed — see console"); }
+  e.target.value = ""; importTargetCounty=null;
+};
+
+// ---------------------------------------------------------------- ui helpers
+function openSheet(id){ document.getElementById(id).classList.add("open"); }
+function closeSheet(id){ document.getElementById(id).classList.remove("open"); }
+document.getElementById("mapsBtn").onclick = ()=> openSheet("mapsSheet");
+let toastT; function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show");
+  clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),2600); }
+
+// ---------------------------------------------------------------- boot
+map.on("load", async ()=>{
+  await loadData();
+  // auto-activate any counties already stored on device
+  const fc = await (await fetch("data.geojson")).json().catch(()=>({features:[]}));
+  const counties = [...new Set(fc.features.map(f=>f.properties&&f.properties.county).filter(Boolean))];
+  for(const c of counties){ if(await haveTiles(c)) activateCounty(c); }
+  if(navigator.storage && navigator.storage.persist) navigator.storage.persist();
+});
+
+if("serviceWorker" in navigator){ navigator.serviceWorker.register("sw.js").catch(console.warn); }
+</script>
+</body>
+</html>
