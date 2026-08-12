@@ -1,4 +1,6 @@
 *.pmtiles
 *.mbtiles
 *.sqlitedb
+data.full.geojson
+*.full.geojson
 
