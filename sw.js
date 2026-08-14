@@ -1,13 +1,14 @@
-// WNY Field Atlas — service worker (offline app shell)
-const CACHE = "wny-atlas-v2";   // bump on every shell change so installed apps update
-const SHELL = [
-  "./", "./index.html", "./manifest.webmanifest",
-  "./icon-192.png", "./icon-512.png", "./data.geojson",
-  "./vendor/maplibre-gl.js", "./vendor/maplibre-gl.css", "./vendor/pmtiles.js"
+// WNY Field Atlas — service worker (v3, network-first shell)
+// Online-first for the HTML + data so updates always appear when you have signal;
+// cache-first only for the big stable libraries/icons; falls back to cache offline.
+const CACHE = "wny-atlas-v3";
+const ASSETS = [
+  "./vendor/maplibre-gl.js", "./vendor/maplibre-gl.css", "./vendor/pmtiles.js",
+  "./icon-192.png", "./icon-512.png"
 ];
 
 self.addEventListener("install", (e)=>{
-  e.waitUntil(caches.open(CACHE).then(c=> c.addAll(SHELL)).then(()=> self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c=> c.addAll(ASSETS)).then(()=> self.skipWaiting()));
 });
 self.addEventListener("activate", (e)=>{
   e.waitUntil(caches.keys().then(keys=> Promise.all(
@@ -15,15 +16,22 @@ self.addEventListener("activate", (e)=>{
 });
 self.addEventListener("fetch", (e)=>{
   const url = e.request.url;
-  // OSM base tiles: network-first, don't fill the cache with the whole world.
-  if(url.includes("tile.openstreetmap.org")) return;
-  // Everything else (app shell + libs + data): cache-first, fall back to network.
-  e.respondWith(
-    caches.match(e.request).then(hit=> hit || fetch(e.request).then(res=>{
-      const copy = res.clone();
-      if(res.ok && (url.startsWith(self.location.origin) || url.includes("unpkg.com")))
-        caches.open(CACHE).then(c=> c.put(e.request, copy));
-      return res;
-    }).catch(()=> hit))
-  );
+  if(url.includes("tile.openstreetmap.org")) return;            // base tiles: straight to network
+  const isAsset = ASSETS.some(a => url.endsWith(a.replace("./","")));
+  if(isAsset){
+    // cache-first for the stable vendored libs + icons
+    e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request).then(r=>{
+      const copy = r.clone(); caches.open(CACHE).then(c=> c.put(e.request, copy)); return r;
+    })));
+  } else {
+    // network-first for the HTML shell + data.geojson (+ anything else) — always fresh online
+    e.respondWith(
+      fetch(e.request).then(r=>{
+        if(r.ok && url.startsWith(self.location.origin)){
+          const copy = r.clone(); caches.open(CACHE).then(c=> c.put(e.request, copy));
+        }
+        return r;
+      }).catch(()=> caches.match(e.request).then(hit => hit || caches.match("./index.html")))
+    );
+  }
 });
