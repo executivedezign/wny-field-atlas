@@ -55,13 +55,13 @@
 
 <!-- Feature info sheet -->
 <div class="sheet" id="infoSheet">
-  <button class="close" onclick="closeSheet('infoSheet')">&times;</button>
+  <button class="close" data-close="infoSheet" aria-label="Close">&times;</button>
   <div id="infoBody"></div>
 </div>
 
 <!-- County maps manager sheet -->
 <div class="sheet" id="mapsSheet">
-  <button class="close" onclick="closeSheet('mapsSheet')">&times;</button>
+  <button class="close" data-close="mapsSheet" aria-label="Close">&times;</button>
   <h2>County maps</h2>
   <div class="sub">Import a county's map file once; it's stored on your phone and works offline. Tap a county to import or toggle it.</div>
   <div class="county-row" style="border-top:0">
@@ -177,14 +177,22 @@ function applyData(fc){
     map.addSource("data", { type:"geojson", data:fc });
     map.addLayer({ id:"data-pts", type:"circle", source:"data",
       paint:{
-        "circle-radius":["interpolate",["linear"],["zoom"],7,3,12,6,15,9],
+        "circle-radius":["interpolate",["linear"],["zoom"],7,5,12,8,15,12],
         "circle-color":["match",["get","kind"],
            "lake","#1668c1","pond","#1aa0c4","trail","#c26a1a",
            "wma","#7a3fb0","viewing","#2e8b57","forest","#4b7a2f",
            "#555"],
         "circle-stroke-width":1.5, "circle-stroke-color":"#fff"
       }});
-    map.on("click","data-pts", e=> showFeature(e.features[0]));
+    // Touch-friendly hit testing: query a padded box around the tap (not the exact
+    // pixel) so near-misses register; a tap on empty map closes the info sheet.
+    map.on("click", (e)=>{
+      const pad = 14;
+      const box = [[e.point.x-pad, e.point.y-pad],[e.point.x+pad, e.point.y+pad]];
+      const feats = map.queryRenderedFeatures(box, {layers:["data-pts"]});
+      if(feats.length) showFeature(nearestFeature(feats, e.point));
+      else closeSheet("infoSheet");
+    });
     map.on("mouseenter","data-pts", ()=> map.getCanvas().style.cursor="pointer");
     map.on("mouseleave","data-pts", ()=> map.getCanvas().style.cursor="");
   }
@@ -210,6 +218,16 @@ function showFeature(f){
   openSheet("infoSheet");
 }
 function labelKind(k){ return ({lake:"Lake / fishing water",pond:"Pond",trail:"Trail",wma:"Wildlife Management Area",viewing:"Wildlife viewing area",forest:"State forest"})[k]||"Location"; }
+// pick the feature closest to the tap point when several fall inside the hit box
+function nearestFeature(feats, pt){
+  let best=feats[0], bd=Infinity;
+  for(const f of feats){
+    const p=map.project(f.geometry.coordinates);
+    const d=(p.x-pt.x)*(p.x-pt.x)+(p.y-pt.y)*(p.y-pt.y);
+    if(d<bd){ bd=d; best=f; }
+  }
+  return best;
+}
 
 // ---------------------------------------------------------------- county manager UI
 async function buildCountyList(fc){
@@ -257,8 +275,15 @@ async function refreshDataPill(){
 }
 
 // ---------------------------------------------------------------- ui helpers
-function openSheet(id){ document.getElementById(id).classList.add("open"); }
+// Only one sheet open at a time — prevents sheets stacking at the bottom (which
+// hid the county buttons and left a "second popup that won't close").
+function openSheet(id){
+  document.querySelectorAll(".sheet").forEach(s=>{ if(s.id!==id) s.classList.remove("open"); });
+  document.getElementById(id).classList.add("open");
+}
 function closeSheet(id){ document.getElementById(id).classList.remove("open"); }
+document.querySelectorAll(".close[data-close]").forEach(btn=>
+  btn.addEventListener("click", ()=> closeSheet(btn.dataset.close)));
 document.getElementById("mapsBtn").onclick = ()=> { refreshDataPill(); openSheet("mapsSheet"); };
 let toastT; function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show");
   clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),2600); }

@@ -1,5 +1,5 @@
 // WNY Field Atlas — service worker (offline app shell)
-const CACHE = "wny-atlas-v1";
+const CACHE = "wny-atlas-v2";   // bump on every shell change so installed apps update
 const SHELL = [
   "./", "./index.html", "./manifest.webmanifest",
   "./icon-192.png", "./icon-512.png", "./data.geojson",
